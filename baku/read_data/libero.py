@@ -6,7 +6,7 @@ from pathlib import Path
 import torch
 import torchvision.transforms as transforms
 from torch.utils.data import IterableDataset
-
+from typing import List, Dict
 
 class BCDataset(IterableDataset):
     def __init__(
@@ -150,16 +150,32 @@ class BCDataset(IterableDataset):
             ]
         )
 
+        self._global_indices = {}  # Maps (env_idx, episode_idx, sample_idx) to global index
+        current_idx = 0
+        
+        # Assign fixed indices during data loading
+        for env_idx in self._episodes:
+            for episode_idx in range(len(self._episodes[env_idx])):
+                episode = self._episodes[env_idx][episode_idx]
+                obs_length = (len(episode['observation']) if self._obs_type == 'features' 
+                            else len(episode['observation']['pixels']))
+                for sample_idx in range(obs_length - self._history_len):
+                    self._global_indices[(env_idx, episode_idx, sample_idx)] = current_idx
+                    current_idx += 1
+
         # Samples from envs
         self.envs_till_idx = len(self._episodes)
 
     def _sample_episode(self, env_idx=None):
         idx = random.randint(0, self.envs_till_idx - 1) if env_idx is None else env_idx
-        episode = random.choice(self._episodes[idx])
-        return (episode, idx) if env_idx is None else episode
+        episode_idx = random.randrange(len(self._episodes[idx]))
+        episode = self._episodes[idx][episode_idx]
+        return (episode, idx, episode_idx) if env_idx is None else episode
 
     def _sample(self):
-        episodes, env_idx = self._sample_episode()
+        env_idx = random.randint(0, self.envs_till_idx - 1)
+        episode_idx = random.randrange(len(self._episodes[env_idx]))
+        episodes = self._episodes[env_idx][episode_idx]
         observations = episodes["observation"]
         actions = episodes["action"]
         task_emb = episodes["task_emb"]
@@ -169,6 +185,7 @@ class BCDataset(IterableDataset):
             sample_idx = np.random.randint(
                 0, len(observations["pixels"]) - self._history_len
             )
+            global_idx = self._global_indices[(env_idx, episode_idx, sample_idx)]
             sampled_pixel = observations["pixels"][
                 sample_idx : sample_idx + self._history_len
             ]
@@ -224,6 +241,7 @@ class BCDataset(IterableDataset):
                     ),
                     "actions": self.preprocess["actions"](sampled_action),
                     "task_emb": task_emb,
+                    "global_idx": global_idx,
                 }
             elif self._prompt == "goal":
                 prompt_episode = self._sample_episode(env_idx)
@@ -254,6 +272,7 @@ class BCDataset(IterableDataset):
                     ),
                     "prompt_actions": self.preprocess["actions"](prompt_action),
                     "task_emb": task_emb,
+                    "global_idx": global_idx,
                 }
             elif self._prompt == "intermediate_goal":
                 prompt_episode = episodes
@@ -291,11 +310,13 @@ class BCDataset(IterableDataset):
                     ),
                     "prompt_actions": self.preprocess["actions"](prompt_action),
                     "task_emb": task_emb,
+                    "global_idx": global_idx,
                 }
 
         elif self._obs_type == "features":
             # Sample obs, action
             sample_idx = np.random.randint(0, len(observations) - self._history_len)
+            global_idx = self._global_indices[(env_idx, episode_idx, sample_idx)]
             sampled_obs = np.array(
                 observations[sample_idx : sample_idx + self._history_len]
             )
@@ -312,6 +333,8 @@ class BCDataset(IterableDataset):
                     "features": sampled_obs,
                     "actions": self.preprocess["actions"](sampled_action),
                     "task_emb": task_emb,
+                    "global_idx": global_idx,
+
                 }
             elif self._prompt == "goal":
                 prompt_episode = self._sample_episode(env_idx)
@@ -323,6 +346,7 @@ class BCDataset(IterableDataset):
                     "prompt_obs": prompt_obs,
                     "prompt_actions": self.preprocess["actions"](prompt_action),
                     "task_emb": task_emb,
+                    "global_idx": global_idx
                 }
             elif self._prompt == "intermediate_goal":
                 prompt_episode = self._sample_episode(env_idx)
@@ -340,6 +364,7 @@ class BCDataset(IterableDataset):
                     "prompt_obs": prompt_obs,
                     "prompt_actions": self.preprocess["actions"](prompt_action),
                     "task_emb": task_emb,
+                    "global_idx": global_idx,
                 }
 
     def sample_test(self, env_idx, step=None):
@@ -426,3 +451,98 @@ class BCDataset(IterableDataset):
 
     def __len__(self):
         return self._num_samples
+
+class BCDatasetSplit(BCDataset):
+    """Extension of BCDataset that handles training/validation splitting"""
+    def __init__(self, parent_dataset: BCDataset, indices: List[int], is_train: bool = True):
+        """
+        Create a split from a parent BCDataset.
+        
+        Args:
+            parent_dataset: The original BCDataset
+            indices: Indices for this split
+            is_train: Whether this is the training split
+        """
+        # Copy parent dataset attributes without reinitializing
+        self.__dict__.update(parent_dataset.__dict__)
+        
+        # Store split-specific information
+        self.original_indices = indices
+        self.is_train = is_train
+        
+        # Create episode mapping for this split with remapped indices
+        self._split_episodes = {}
+        for new_idx, original_idx in enumerate(self.original_indices):
+            self._split_episodes[new_idx] = self._episodes[original_idx]
+        
+        # Override episodes with split episodes
+        self._episodes = self._split_episodes
+        
+        # Recompute split-specific attributes
+        self._num_samples = sum(
+            len(episode['observation']) if self._obs_type == 'features' 
+            else len(episode['observation']['pixels'])
+            for episodes in self._episodes.values()
+            for episode in episodes
+        )
+        
+        # Update envs_till_idx for this split
+        self.envs_till_idx = len(self._episodes)
+        
+        # For train split only, extract actions for discretization
+        if is_train:
+            self.actions = []
+            for episodes in self._episodes.values():
+                for episode in episodes:
+                    self.actions.append(episode['action'])
+
+    def _sample_episode(self, env_idx=None):
+        """
+        Override sample_episode to handle remapped indices
+        """
+        if env_idx is None:
+            idx = random.randint(0, self.envs_till_idx - 1)
+            episode = random.choice(self._episodes[idx])
+            return (episode, idx)
+        else:
+            # For explicit env_idx requests, we need to handle remapping
+            if env_idx >= self.envs_till_idx:
+                raise IndexError(f"env_idx {env_idx} out of range for split with {self.envs_till_idx} environments")
+            episode = random.choice(self._episodes[env_idx])
+            return episode
+
+def create_train_val_splits(dataset: BCDataset, val_ratio: float = 0.1, seed: int = None):
+    """
+    Create training and validation splits from a BCDataset.
+    
+    Args:
+        dataset: Original BCDataset
+        val_ratio: Proportion of data to use for validation
+        seed: Random seed for reproducibility
+    
+    Returns:
+        train_dataset, val_dataset (tuple of BCDatasetSplit)
+    """
+    if seed is not None:
+        random.seed(seed)
+    
+    # Get all environment indices
+    all_indices = list(dataset._episodes.keys())
+    
+    # Calculate split sizes
+    total_envs = len(all_indices)
+    val_size = int(total_envs * val_ratio)
+    train_size = total_envs - val_size
+    
+    # Randomly shuffle indices
+    random.shuffle(all_indices)
+    
+    # Split indices
+    train_indices = all_indices[:train_size]
+    val_indices = all_indices[train_size:]
+    
+    # Create split datasets
+    train_dataset = BCDatasetSplit(dataset, train_indices, is_train=True)
+    val_dataset = BCDatasetSplit(dataset, val_indices, is_train=False)
+    
+    return train_dataset, val_dataset
