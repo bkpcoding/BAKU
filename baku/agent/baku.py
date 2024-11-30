@@ -21,6 +21,8 @@ from agent.networks.mlp import MLP
 from agent.networks.kmeans_discretizer import KMeansDiscretizer
 from torchinfo import summary
 from agent.networks.vqbet_gradsampler import VQBeTGradWrapper
+from opacus.grad_sample import GradSampleModule
+import copy
 
 
 class Actor(nn.Module):
@@ -81,13 +83,13 @@ class Actor(nn.Module):
                 num_layers=2,
             )
         elif policy_head == "vqbet":
-            self._action_head = VQBeTHead(
+            self._action_head = VQBeTGradWrapper(VQBeTHead(
                 hidden_dim,
                 self._act_dim,
                 hidden_size=hidden_dim,
                 device=device,
-            )
-            self._action_head = VQBeTGradWrapper(self._action_head)
+            ))
+            # self._action_head = VQBeTGradWrapper(self._action_head)
             # print(summary(self._action_head, input_size=(96, 1, 256)))
             # self._action_head = GradSampleModule(self._action_head)
         elif policy_head == "diffusion":
@@ -103,30 +105,27 @@ class Actor(nn.Module):
 
         self.apply(utils.weight_init)
 
+
     def forward(self, obs, num_prompt_feats, stddev, action=None, cluster_centers=None):
+        # Convert integer inputs to tensors if they aren't already
+        if not isinstance(num_prompt_feats, torch.Tensor):
+            num_prompt_feats = torch.tensor(num_prompt_feats, device=obs.device)
+        if stddev is not None and not isinstance(stddev, torch.Tensor):
+            stddev = torch.tensor(stddev, device=obs.device)
+
         B, T, D = obs.shape
         if self._policy_type == "mlp":
             if T * D < self._repr_dim:
-                gt_num_time_steps = (
-                    self._repr_dim // D - num_prompt_feats
-                ) // self._num_feat_per_step
-                num_repeat = (
-                    gt_num_time_steps
-                    - (T - num_prompt_feats) // self._num_feat_per_step
-                )
-                initial_obs = obs[
-                    :, num_prompt_feats : num_prompt_feats + self._num_feat_per_step
-                ]
+                gt_num_time_steps = (self._repr_dim // D - num_prompt_feats) // self._num_feat_per_step
+                num_repeat = gt_num_time_steps - (T - num_prompt_feats) // self._num_feat_per_step
+                initial_obs = obs[:, num_prompt_feats:num_prompt_feats + self._num_feat_per_step]
                 initial_obs = initial_obs.repeat(1, num_repeat, 1)
-                obs = torch.cat(
-                    [obs[:, :num_prompt_feats], initial_obs, obs[:, num_prompt_feats:]],
-                    dim=1,
-                )
+                obs = torch.cat([obs[:, :num_prompt_feats], initial_obs, obs[:, num_prompt_feats:]], dim=1)
                 B, T, D = obs.shape
             obs = obs.view(B, 1, T * D)
             features = self._policy(obs)
         elif self._policy_type == "gpt":
-            # insert action token at each self._num_feat_per_step interval
+            # Convert integer indices to tensors
             prompt = obs[:, :num_prompt_feats]
             obs = obs[:, num_prompt_feats:]
             obs = obs.view(B, -1, self._num_feat_per_step, obs.shape[-1])
@@ -134,22 +133,18 @@ class Actor(nn.Module):
             obs = torch.cat([obs, action_token], dim=-2).view(B, -1, D)
             obs = torch.cat([prompt, obs], dim=1)
 
-            # get action features
             features = self._policy(obs)
             features = features[:, num_prompt_feats:]
-            num_feat_per_step = self._num_feat_per_step + 1  # +1 for action token
-            features = features[:, num_feat_per_step - 1 :: num_feat_per_step]
+            num_feat_per_step = self._num_feat_per_step + 1
+            features = features[:, num_feat_per_step - 1::num_feat_per_step]
 
-        # action head
+        # Ensure all inputs to action head are tensors
         pred_action = self._action_head(
             features,
             stddev,
-            **{"cluster_centers": cluster_centers, "action_seq": action},
+            cluster_centers=cluster_centers,
+            action_seq=action
         )
-        # shape of the input is ([96, 1, 256])
-        for name, param in self._action_head.named_parameters():
-            if hasattr(param, "grad_sample"):
-                print(f"Param {name} has grad sample, yaya!! ")
 
         if action is None:
             return pred_action
@@ -158,10 +153,9 @@ class Actor(nn.Module):
                 pred_action,
                 action,
                 reduction="mean",
-                **{"cluster_centers": cluster_centers},
+                cluster_centers=cluster_centers
             )
             return pred_action, loss[0] if isinstance(loss, tuple) else loss
-
 
 class BCAgent:
     def __init__(
@@ -412,6 +406,9 @@ class BCAgent:
         if obs_type == "pixels" and self.augment:
             self.test_aug = T.Compose([T.ToPILImage(), T.ToTensor()])
 
+        self.val_batch = None
+        self.shapley_values = {}
+        self.iteration_count = {}
         self.train()
         self.buffer_reset()
 
@@ -496,7 +493,7 @@ class BCAgent:
             self._cluster_centers = self.discretizer.bin_centers.float().to(self.device)
         elif self.policy_head == "vqbet":
             config = {
-                "epochs": 101, # default was 2001
+                "epochs": 51, # default was 2001
                 "batch_size": 2048,
                 "save_every": 50,
             }
@@ -645,6 +642,13 @@ class BCAgent:
             kwargs["cluster_centers"] = self._cluster_centers
 
         stddev = utils.schedule(self.stddev_schedule, global_step)
+        # convert to tensor instead of int as grad_sample_module expect tensors as input not int
+        if not isinstance(num_prompt_feats, torch.Tensor):
+            num_prompt_feats = torch.tensor(num_prompt_feats, device=obs.device)
+        if stddev is not None and not isinstance(stddev, torch.Tensor):
+            stddev = torch.tensor(stddev, device=obs.device)
+        print(f"*********** stddev and num_prompt_feats {stddev, num_prompt_feats}*********************")
+
         action = self.actor(features.unsqueeze(0), num_prompt_feats, stddev, **kwargs)
 
         if self.policy_head == "bet":
@@ -679,13 +683,87 @@ class BCAgent:
                 return post_process(action.cpu().numpy()[0, -1])
             return action.cpu().numpy()[0, -1, :]
 
-    def update(self, expert_replay_iter, step, update=True):
-        metrics = dict()
 
-        batch = next(expert_replay_iter)
-        data = utils.to_torch(batch, self.device)
-        action = data["actions"].float()
+    def compute_efficient_dot_products(self, batch_indices, **kwargs):
+        batch_size = batch_indices.shape[0]
+        # Clone model and wrap with GradSampleModule for Shapley computation
+        # with torch.no_grad():
+            # model_clone = copy.deepcopy(self.actor)
+            # model_clone = VQBeTGradWrapper(model_clone)
+            # model_clone = GradSampleModule(model_clone)
+            # Collect module names into a separate list
+            # module_names = [name for name, _ in model_clone.named_modules()]
 
+            # Iterate over the collected names to avoid modifying the dictionary during iteration
+            # for name in module_names:
+            #     module = dict(model_clone.named_modules())[name]
+            #     if not isinstance(module, GradSampleModule) and hasattr(module, "weight"):
+            #         # Rewrap the module manually
+            #         parent_name = ".".join(name.split(".")[:-1])
+            #         module_name = name.split(".")[-1]
+
+            #         # Access the parent module
+            #         parent_module = model_clone
+            #         if parent_name:
+            #             for subname in parent_name.split("."):
+            #                 parent_module = getattr(parent_module, subname)
+
+            #         # Replace the original module with the wrapped one
+            #         setattr(parent_module, module_name, GradSampleModule(module))
+
+            # for name, param in self.actor.named_parameters():
+            #     if hasattr(param, "grad_sample"):
+            #         print(f"Module {name} has grad sample")
+            #     else:
+            #         print(f"Module {name} has no grad sample ******* :(")
+
+            # model_clone.to(self.device)
+
+        dot_products = torch.zeros(batch_size, device=self.device)
+        
+        # Compute dot products using grad_sample
+        for name, param in self.actor.named_parameters():
+            if hasattr(param, "grad_sample"):
+                if param.grad_sample == None:
+                    # print(f"Name with batch_grad None: {name}")
+                    continue
+                batch_grad = param.grad_sample[:batch_size].clone()
+                val_grad = param.grad_sample[batch_size:].clone()
+                assert isinstance(batch_grad, torch.Tensor) and isinstance(val_grad, torch.Tensor)
+                try:
+                    batch_flat = batch_grad.reshape(batch_size, -1)
+                    val_flat = val_grad.reshape(val_grad.shape[0], -1)
+                except RuntimeError:
+                    batch_flat = batch_grad.reshape(batch_grad.shape[0], -1) # if the shape is something like [1, 65, 256]
+                    val_flat = batch_flat       # TODO: have to check if it correct, thinking behind it some layers might return
+                    # outputs of just size 1 instead of batch_size. This handles it.
+                dot_products += torch.mm(batch_flat, val_flat.t()).squeeze()
+                param.grad_sample = None
+        # Clean up
+        torch.cuda.empty_cache()
+        return dot_products
+
+
+    def update_shapley_values(self, batch_indices, **kwargs):
+        """
+        Computes the shapley values for the training datapoints based on the 
+        validation point using ghost dot products
+        https://arxiv.org/abs/2406.11011
+        """
+        dot_products = self.compute_efficient_dot_products(batch_indices, **kwargs)
+        for idx, dot_product in zip(batch_indices, dot_products):
+            idx = idx.item()
+            # TODO: see where to get the learning_rate from 
+            shapley_value = -0.001 * dot_product.item()
+            
+            if idx not in self.shapley_values:
+                self.shapley_values[idx] = 0
+                self.iteration_count[idx] = 0
+                
+            self.shapley_values[idx] += shapley_value
+            self.iteration_count[idx] += 1
+
+    def process_data(self, data, action):
         # lang projection
         if self.use_language:
             lang_features = (
@@ -811,14 +889,73 @@ class BCAgent:
         if self.temporal_agg:
             action = einops.rearrange(action, "b t1 t2 d -> b t1 (t2 d)")
 
+        return features, num_prompt_feats, action
+
+
+    def update(self, expert_replay_iter, step, update=True, calculate_shapley=False, val_replay_iter=None):
+        if calculate_shapley:
+            assert val_replay_iter != None
+        metrics = dict()
+
+        batch = next(expert_replay_iter)
+        batch_indices = batch['global_idx']
+        batch_size = batch_indices.shape[0]
+        data = utils.to_torch(batch, self.device)
+        if self.val_batch is None and calculate_shapley:
+            # update the val_batch only once as we don't want to change validation
+            # datapoint in the middle 
+            self.val_batch = next(val_replay_iter)
+        if calculate_shapley:
+            val_data = utils.to_torch(self.val_batch, self.device)
+            # Concatenate each key in data with val_data
+            for key in data.keys():
+                if key in val_data:  # Make sure the key exists in val_data
+                    data[key] = torch.cat([data[key], val_data[key]], dim=0)
+        action = data["actions"].float()
+        features, num_prompt_feats, action = self.process_data(data=data, action=action)
+        
+
         # Pass cluster center to actor for bet
         kwargs = {}
         if self.policy_head == "bet":
             kwargs["cluster_centers"] = self._cluster_centers
 
         if update:
-            # actor loss
+            # if calculate_shapley:
+            #     # do similarly for validation data
+            #     val_batch = next(validation_point)
+            #     val_data = utils.to_torch(val_batch, self.device)
+            #     val_action = val_data["actions"].float()
+            #     stddev = utils.schedule(self.stddev_schedule, step)
+            #     val_features, val_num_prompt_feats, val_action = self.process_data(data=val_data, action=val_action)
+            #     val_data = {'features': val_features, 'num_prompt_feats': val_num_prompt_feats, 
+            #                     'stddev': stddev, 'action': val_action}
+            #     if not isinstance(val_data['num_prompt_feats'], torch.Tensor):
+            #         val_data['num_prompt_feats'] = torch.tensor(val_data['num_prompt_feats'], device=self.device)
+            #     if val_data['stddev'] is not None and not isinstance(val_data['stddev'], torch.Tensor):
+            #         val_data['stddev'] = torch.tensor(val_data['stddev'], device=self.device)
+
+            #     _, val_actor_loss = self.actor(
+            #         obs=val_data['features'], num_prompt_feats=val_data['num_prompt_feats'], stddev=val_data['stddev'], action=val_data['action'], **kwargs
+            #     )
+            #     val_actor_loss["actor_loss"].backward()
+            
+            #     # Store validation gradients
+            #     val_grads = {}
+            #     for name, param in self.actor.named_parameters():
+            #         if hasattr(param, "grad_sample"):
+            #             # print(f"Name of the module: {name}, param.grad_sample: {param.grad_sample}")
+            #             if param.grad_sample == None:
+            #                 print(f"Name with grad_sample none: {name}")
+            #                 continue
+            #             val_grads[name] = param.grad_sample[0].clone()
+            #             assert isinstance(val_grads[name], torch.Tensor)
+
             stddev = utils.schedule(self.stddev_schedule, step)
+            if not isinstance(num_prompt_feats, torch.Tensor):
+                num_prompt_feats = torch.tensor(num_prompt_feats, device=self.device)
+            if stddev is not None and not isinstance(stddev, torch.Tensor):
+                stddev = torch.tensor(stddev, device=self.device)
             _, actor_loss = self.actor(
                 features, num_prompt_feats, stddev, action, **kwargs
             )
@@ -831,6 +968,17 @@ class BCAgent:
                 self.language_opt.zero_grad(set_to_none=True)
             self.actor_opt.zero_grad(set_to_none=True)
             actor_loss["actor_loss"].backward()
+            # have to put the training and validation datapoint in the same batch instead of doing seperately
+            train_data = {'features': features, 'num_prompt_feats': num_prompt_feats,
+                          'stddev': stddev, 'action': action}
+            self.update_shapley_values(batch_indices, **kwargs)
+            # remove the validation point gradients
+            for param in self.actor.parameters():
+                if hasattr(param, 'grad_sample'):
+                    if param.grad_sample is not None:
+                        # Keep only the gradients for the training batch
+                        param.grad = param.grad_sample[:batch_size].mean(dim=0)
+                        param.grad_sample = None
             if self.train_encoder:
                 self.encoder_opt.step()
             if self.obs_type == "pixels" and self.use_proprio:
@@ -838,18 +986,24 @@ class BCAgent:
             if self.use_language:
                 self.language_opt.step()
             self.actor_opt.step()
-
             if self.policy_head == "diffusion" and step % 10 == 0:
                 self.actor._action_head.net.ema_step()
 
             if self.use_tb:
                 for key, value in actor_loss.items():
                     metrics[key] = value.item()
-
+            if calculate_shapley:
+                return metrics, self.shapley_values
             return metrics
 
         else:
             stddev = utils.schedule(self.stddev_schedule, step)
+            # convert to tensor instead of int as grad_sample_module expect tensors as input not int
+            if not isinstance(num_prompt_feats, torch.Tensor):
+                num_prompt_feats = torch.tensor(num_prompt_feats, device=self.device)
+            if stddev is not None and not isinstance(stddev, torch.Tensor):
+                stddev = torch.tensor(stddev, device=self.device)
+            print(f"*********** stddev and num_prompt_feats {stddev, num_prompt_feats}*********************")
             pred_action, actor_loss = self.actor(
                 features, num_prompt_feats, stddev, action, **kwargs
             )
@@ -868,7 +1022,7 @@ class BCAgent:
                 pred_action = pred_action[0]
             else:
                 pred_action = pred_action.mean
-            metrics["pred_action"] = pred_action.cpu().numpy()
+            metrics["pred_action"] = pred_action.detach().cpu().numpy()
 
             return metrics
 

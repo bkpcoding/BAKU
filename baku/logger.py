@@ -164,10 +164,15 @@ class Logger(object):
             self._sw.add_scalar(key, value, step)
 
     def log(self, key, value, step):
-        assert key.startswith("train") or key.startswith("eval")
+        assert key.startswith("train") or key.startswith("eval") or key.startswith("validation")
         if type(value) == torch.Tensor:
             value = value.item()
-        self._try_sw_log(key, value, step)
+        try:
+            self._try_sw_log(key, value, step)
+        except:
+            # validation currently passes metrics that are not scalar values, correct this in
+            # train.update
+            pass
         if key.startswith("train_vq"):
             mg = self._train_vq_mg
         else:

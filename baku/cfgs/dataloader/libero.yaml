@@ -13,3 +13,19 @@ bc_dataset:
   num_queries: ${num_queries}
   img_size: 128
   store_actions: true
+
+test_dataset:
+  _target_: read_data.libero.BCDataset
+  path: "/home/shared_data/data_attrib_data/pkl_libero/"
+  suite: ${test.suite}
+  scenes: ${test.scenes}
+  tasks: ${test.tasks}
+  num_demos_per_task: ${num_demos_per_task}
+  obs_type: ${obs_type}
+  history: ${suite.history}
+  history_len: ${suite.history_len}
+  prompt: ${prompt}
+  temporal_agg: ${temporal_agg}
+  num_queries: ${num_queries}
+  img_size: 128
+  store_actions: true

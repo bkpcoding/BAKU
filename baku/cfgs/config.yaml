@@ -2,6 +2,7 @@ defaults:
   - _self_
   - agent: baku
   - suite: libero
+  - test: test_point
   - dataloader: libero
   - override hydra/launcher: submitit_local
 
@@ -14,7 +15,7 @@ device: cuda
 save_video: true
 save_train_video: false
 use_tb: true
-batch_size: 96
+batch_size: 96 # default was 96
 
 # experiment
 obs_type: "pixels" # pixels, features
@@ -36,6 +37,7 @@ num_queries: 10
 
 # expert dataset
 expert_dataset: ${dataloader.bc_dataset}
+test_dataset: ${dataloader.test_dataset}
 
 # Load weights
 load_bc: false

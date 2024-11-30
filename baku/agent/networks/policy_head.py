@@ -282,7 +282,10 @@ class BeTHead(nn.Module):
 
 
 ######################################### VQ-BeT Head #########################################
-
+def gumbel_softmax(logits, temperature=1.0):
+    gumbels = -torch.empty_like(logits).exponential_().log()
+    gumbels = (logits + gumbels) / temperature
+    return F.softmax(gumbels, dim=-1)
 
 class VQBeTHead(nn.Module):
     def __init__(
@@ -357,20 +360,32 @@ class VQBeTHead(nn.Module):
             cbet_offsets = einops.rearrange(
                 cbet_offsets, "(NT) (G C WA) -> (NT) G C WA", G=self._G, C=self._C
             )
-            cbet_probs1 = torch.softmax(cbet_logits1, dim=-1)
+            # cbet_probs1 = torch.softmax(cbet_logits1, dim=-1)
+            # commenting the above because it makes the cbet_logits2 non-differentiable 
+            # due to sampling. That's why we need the gambel softmax, or we can also 
+            # use straight through estimator.
+            temperature = 1.0
+            gumbels = -torch.empty_like(cbet_logits1).exponential_().log()
+            gumbels = (cbet_logits1 + gumbels) / temperature
+            cbet_probs1 = F.softmax(gumbels, dim=-1)
+
+            # cbet_probs1 = gumbel_softmax(cbet_logits1)
+            sampled_centers1 = torch.argmax(cbet_probs1, dim=-1)
             NT, choices = cbet_probs1.shape
             G = self._G
-            sampled_centers1 = einops.rearrange(
-                torch.multinomial(cbet_probs1.view(-1, choices), num_samples=1),
-                "(NT) 1 -> NT",
-                NT=NT,
-            )
-            cbet_logits2 = self._map_to_cbet_preds_bin2(
-                torch.cat(
-                    (x, F.one_hot(sampled_centers1, num_classes=self._C)),
-                    axis=1,
-                )
-            )
+            # sampled_centers1 = einops.rearrange(
+            #     torch.multinomial(cbet_probs1.view(-1, choices), num_samples=1),
+            #     "(NT) 1 -> NT",
+            #     NT=NT,
+            # )
+            # cbet_logits2 = self._map_to_cbet_preds_bin2(
+            #     torch.cat(
+            #         (x, F.one_hot(sampled_centers1, num_classes=self._C)),
+            #         axis=1,
+            #     )
+            # )
+            cbet_logits2 = self._map_to_cbet_preds_bin2(torch.cat((x, cbet_probs1), axis=1))
+
             cbet_probs2 = torch.softmax(cbet_logits2, dim=-1)
             sampled_centers2 = einops.rearrange(
                 torch.multinomial(cbet_probs2.view(-1, choices), num_samples=1),
@@ -536,7 +551,8 @@ class VQBeTHead(nn.Module):
                 )
             )
             cbet_loss2 = self._criterion(  # F.cross_entropy
-                cbet_logits2[:, :],
+                # cbet_logits2[:, :],       # previously used, but breaks the computational graph
+                pred["cbet_logits2"][:, :],
                 action_bins[:, 1],
             )
         else:

@@ -21,6 +21,16 @@ class VQBeTGradWrapper(GradSampleModule):
         self.offset_loss_weight = vqbet_head.offset_loss_weight
         self.secondary_code_multiplier = vqbet_head.secondary_code_multiplier
         
+
+        # Explicitly register the prediction networks as submodules
+        if self.sequentially_select:
+            self._map_to_cbet_preds_bin1 = vqbet_head._map_to_cbet_preds_bin1
+            self._map_to_cbet_preds_bin2 = vqbet_head._map_to_cbet_preds_bin2
+        else:
+            self._map_to_cbet_preds_bin = vqbet_head._map_to_cbet_preds_bin
+            
+        self._map_to_cbet_preds_offset = vqbet_head._map_to_cbet_preds_offset
+
     def discretize(self, config, actions):
         """
         Delegate discretize to the wrapped module

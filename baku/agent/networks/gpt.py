@@ -159,7 +159,7 @@ class GPTConfig:
     n_embd: int = 768
     dropout: float = 0.1
 
-
+from opacus import GradSampleModule
 class GPT(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -177,7 +177,9 @@ class GPT(nn.Module):
                 ln_f=nn.LayerNorm(config.n_embd),
             )
         )
+        self.transformer = GradSampleModule(self.transformer)
         self.lm_head = nn.Linear(config.n_embd, config.output_dim, bias=False)
+        self.lm_head = GradSampleModule(self.lm_head)
         # init all weights, and apply a special scaled init to the residual projections, per GPT-2 paper
         self.apply(self._init_weights)
         for pn, p in self.named_parameters():

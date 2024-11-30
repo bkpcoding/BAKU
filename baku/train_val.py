@@ -17,6 +17,7 @@ import utils
 from logger import Logger
 from replay_buffer import make_expert_replay_loader
 from video import VideoRecorder
+from read_data.libero import create_train_val_splits
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 torch.backends.cudnn.benchmark = True
@@ -37,6 +38,7 @@ def make_agent(obs_spec, action_spec, cfg):
 class WorkspaceIL:
     def __init__(self, cfg):
         self.work_dir = Path.cwd()
+        print(f"workspace: {self.work_dir}")
 
         self.cfg = cfg
         utils.set_seed_everywhere(cfg.seed)
@@ -44,29 +46,43 @@ class WorkspaceIL:
 
         # load data
         dataset_iterable = hydra.utils.call(self.cfg.expert_dataset)
-        test_dataset_iterable = hydra.utils.call(self.cfg.test_dataset)
-        self.expert_replay_loader = make_expert_replay_loader(
-            dataset_iterable, self.cfg.batch_size
-        )
-        self.test_replayer_loader = make_expert_replay_loader(
-            test_dataset_iterable, 1 # keeping the batch size 1 since we are evaluating on only one test point for now
-        )
-        self.expert_replay_iter = iter(self.expert_replay_loader)
-        self.test_replayer_iter = iter(self.test_replayer_loader)
-        self.stats = self.expert_replay_loader.dataset.stats
+        
+        # Create train/val splits
+        # val_split = self.cfg.val_split if hasattr(self.cfg, 'val_split') else 0.1
+        # self.train_dataset, self.val_dataset = create_train_val_splits(
+        #     dataset_iterable, 
+        #     val_ratio=val_split,
+        #     seed=cfg.seed
+        # )
+        
+        # # Create data loaders
+        # self.train_replay_loader = make_expert_replay_loader(
+        #     self.train_dataset, self.cfg.batch_size
+        # )
+        # self.val_replay_loader = make_expert_replay_loader(
+        #     self.val_dataset, self.cfg.batch_size
+        # )
+        
+        
+        self.train_replay_iter = iter(self.train_replay_loader)
+        self.val_replay_iter = iter(self.val_replay_loader)
+        
+        # Use original dataset's stats for normalization
+        self.stats = dataset_iterable.stats
 
         # create logger
         self.logger = Logger(self.work_dir, use_tb=self.cfg.use_tb)
+        
         # create envs
         self.cfg.suite.task_make_fn.max_episode_len = (
-            self.expert_replay_loader.dataset._max_episode_len
+            dataset_iterable._max_episode_len  # Use original dataset for these params
         )
         self.cfg.suite.task_make_fn.max_state_dim = (
-            self.expert_replay_loader.dataset._max_state_dim
+            dataset_iterable._max_state_dim
         )
         if self.cfg.suite.name == "dmc":
             self.cfg.suite.task_make_fn.max_action_dim = (
-                self.expert_replay_loader.dataset._max_action_dim
+                dataset_iterable._max_action_dim
             )
 
         self.env, self.task_descriptions = hydra.utils.call(self.cfg.suite.task_make_fn)
@@ -76,7 +92,7 @@ class WorkspaceIL:
             self.env[0].observation_spec(), self.env[0].action_spec(), cfg
         )
 
-        self.envs_till_idx = self.expert_replay_loader.dataset.envs_till_idx
+        self.envs_till_idx = dataset_iterable.envs_till_idx  # Use original dataset
 
         # Discretizer for BeT
         if repr(self.agent) != "mtact":
@@ -84,9 +100,10 @@ class WorkspaceIL:
                 "bet",
                 "vqbet",
             ]:
+                # Use training set only for discretization
                 self.agent.discretize(
-                    self.expert_replay_loader.dataset.actions,
-                    self.expert_replay_loader.dataset.preprocess,
+                    self.train_replay_loader.dataset.actions,
+                    self.train_replay_loader.dataset.preprocess,
                 )
 
         self.timer = utils.Timer()
@@ -184,6 +201,7 @@ class WorkspaceIL:
         log_every_step = utils.Every(self.cfg.suite.log_every_steps, 1)
         eval_every_step = utils.Every(self.cfg.suite.eval_every_steps, 1)
         save_every_step = utils.Every(self.cfg.suite.save_every_steps, 1)
+        # validate_every_step = utils.Every(self.cfg.suite.validate_every_steps if hasattr(self.cfg.suite, 'validate_every_steps') else 1000, 1)
 
         metrics = None
         while train_until_step(self.global_step):
@@ -198,8 +216,13 @@ class WorkspaceIL:
                 )
                 self.eval()
 
-            # update
-            metrics, shapley_values = self.agent.update(self.expert_replay_iter, self.global_step, calculate_shapley=True, val_replay_iter=self.test_replayer_iter)
+            # Validate on validation set
+            # if validate_every_step(self.global_step):
+            #     val_metrics = self.validate()
+            #     self.logger.log_metrics(val_metrics, self.global_frame, ty="validation")
+
+            # update using training set
+            metrics = self.agent.update(self.train_replay_iter, self.global_step, calculate_shapley=True, validation_point=self.val_replay_iter)
             self.logger.log_metrics(metrics, self.global_frame, ty="train")
 
             # log
@@ -215,6 +238,15 @@ class WorkspaceIL:
                 self.save_snapshot()
 
             self._global_step += 1
+
+    def validate(self):
+        """
+        Run validation on the validation set
+        """
+        self.agent.train(False)  # Set to eval mode
+        metrics = self.agent.update(self.val_replay_iter, self.global_step, update=False)
+        self.agent.train(True)  # Set back to train mode
+        return metrics
 
     def save_snapshot(self):
         snapshot_dir = self.work_dir / "snapshot"
