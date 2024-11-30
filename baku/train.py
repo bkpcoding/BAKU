@@ -43,10 +43,10 @@ class WorkspaceIL:
         self.device = torch.device(cfg.device)
 
         # load data
-        dataset_iterable = hydra.utils.call(self.cfg.expert_dataset)
+        self.dataset_iterable = hydra.utils.call(self.cfg.expert_dataset)
         test_dataset_iterable = hydra.utils.call(self.cfg.test_dataset)
         self.expert_replay_loader = make_expert_replay_loader(
-            dataset_iterable, self.cfg.batch_size
+            self.dataset_iterable, self.cfg.batch_size
         )
         self.test_replayer_loader = make_expert_replay_loader(
             test_dataset_iterable, 1 # keeping the batch size 1 since we are evaluating on only one test point for now
@@ -200,6 +200,10 @@ class WorkspaceIL:
 
             # update
             metrics, shapley_values = self.agent.update(self.expert_replay_iter, self.global_step, calculate_shapley=True, val_replay_iter=self.test_replayer_iter)
+            if self.global_step % 100 == 0:
+                positve_samples, negative_samples = self.analyze_shapley_values(shapley_values, self.dataset_iterable)
+                self.print_shapley_analysis(positve_samples, negative_samples)
+                self.analyze_environment_influence(shapley_values, self.dataset_iterable)
             self.logger.log_metrics(metrics, self.global_frame, ty="train")
 
             # log
@@ -215,6 +219,133 @@ class WorkspaceIL:
                 self.save_snapshot()
 
             self._global_step += 1
+
+
+    def analyze_shapley_values(self, shapley_values, dataset, top_k=10):
+        """
+        Analyzes Shapley values to find most influential training examples.
+        
+        Args:
+            shapley_values (dict): Dictionary mapping global indices to their Shapley values
+            dataset (BCDataset): The training dataset instance
+            top_k (int): Number of top positive and negative examples to return
+        
+        Returns:
+            tuple: (top_positive_samples, top_negative_samples) where each is a list of 
+            (env_idx, episode_idx, sample_idx, shapley_value) tuples
+        """
+        # Convert dictionary to list of (index, value) pairs
+        shapley_items = [(idx, np.mean(values) if isinstance(values, list) else values) 
+                        for idx, values in shapley_values.items()]
+        
+        # Sort by Shapley value
+        sorted_items = sorted(shapley_items, key=lambda x: x[1])
+        
+        # Get top negative and positive influences
+        top_negative = sorted_items[:top_k]
+        top_positive = sorted_items[-top_k:][::-1]  # Reverse to get highest first
+        
+        def map_global_to_local(global_idx):
+            # Find the corresponding (env_idx, episode_idx, sample_idx)
+            for (env_idx, episode_idx, sample_idx), idx in dataset._global_indices.items():
+                if idx == global_idx:
+                    return (env_idx, episode_idx, sample_idx)
+            return None
+        
+        # Map global indices to local indices
+        negative_samples = []
+        for global_idx, shapley_value in top_negative:
+            local_indices = map_global_to_local(global_idx)
+            if local_indices:
+                negative_samples.append((*local_indices, shapley_value))
+        
+        positive_samples = []
+        for global_idx, shapley_value in top_positive:
+            local_indices = map_global_to_local(global_idx)
+            if local_indices:
+                positive_samples.append((*local_indices, shapley_value))
+                
+        return positive_samples, negative_samples
+
+
+    def analyze_environment_influence(self, shapley_values, dataset):
+        """
+        Analyzes total and average Shapley values per environment.
+        
+        Args:
+            shapley_values (dict): Dictionary mapping global indices to their Shapley values
+            dataset (BCDataset): The training dataset instance
+        
+        Returns:
+            tuple: Dictionaries containing environment-wise total and average influences
+        """
+        # Initialize dictionaries to store environment-wise statistics
+        env_total_influence = {}  # Sum of Shapley values per environment
+        env_count = {}           # Count of samples per environment
+        
+        # Map each global index to its environment and accumulate values
+        for global_idx, values in shapley_values.items():
+            # Find corresponding environment index
+            for (env_idx, episode_idx, sample_idx), idx in dataset._global_indices.items():
+                if idx == global_idx:
+                    shapley_value = np.mean(values) if isinstance(values, list) else values
+                    
+                    if env_idx not in env_total_influence:
+                        env_total_influence[env_idx] = 0
+                        env_count[env_idx] = 0
+                        
+                    env_total_influence[env_idx] += shapley_value
+                    env_count[env_idx] += 1
+                    break
+        
+        # Calculate average influence per environment
+        env_avg_influence = {
+            env_idx: total / env_count[env_idx]
+            for env_idx, total in env_total_influence.items()
+        }
+        
+        # Find environments with max and min influence
+        max_env = max(env_avg_influence.items(), key=lambda x: x[1])
+        min_env = min(env_avg_influence.items(), key=lambda x: x[1])
+        
+        print("\nEnvironment-wise Influence Analysis:")
+        print("===================================")
+        print(f"\nMost Influential Environment:")
+        print(f"Environment {max_env[0]}: Average Shapley Value = {max_env[1]:.6f}")
+        print(f"Total Influence = {env_total_influence[max_env[0]]:.6f}")
+        print(f"Number of samples = {env_count[max_env[0]]}")
+        
+        print(f"\nLeast Influential Environment:")
+        print(f"Environment {min_env[0]}: Average Shapley Value = {min_env[1]:.6f}")
+        print(f"Total Influence = {env_total_influence[min_env[0]]:.6f}")
+        print(f"Number of samples = {env_count[min_env[0]]}")
+        
+        print("\nAll Environments Summary:")
+        print("------------------------")
+        for env_idx in sorted(env_avg_influence.keys()):
+            print(f"Environment {env_idx:2d}: "
+                f"Avg = {env_avg_influence[env_idx]:10.6f}, "
+                f"Total = {env_total_influence[env_idx]:10.6f}, "
+                f"Samples = {env_count[env_idx]:4d}")
+        
+        return env_total_influence, env_avg_influence
+
+    
+    def print_shapley_analysis(self, positive_samples, negative_samples):
+        """Prints the analysis results in a formatted way"""
+        print("\nTop Positive Influential Samples:")
+        print("=================================")
+        print(f"{'Env':>5} {'Episode':>8} {'Sample':>8} {'Shapley Value':>15}")
+        print("-" * 40)
+        for env_idx, episode_idx, sample_idx, value in positive_samples:
+            print(f"{env_idx:5d} {episode_idx:8d} {sample_idx:8d} {value:15.6f}")
+        
+        print("\nTop Negative Influential Samples:")
+        print("=================================")
+        print(f"{'Env':>5} {'Episode':>8} {'Sample':>8} {'Shapley Value':>15}")
+        print("-" * 40)
+        for env_idx, episode_idx, sample_idx, value in negative_samples:
+            print(f"{env_idx:5d} {episode_idx:8d} {sample_idx:8d} {value:15.6f}")
 
     def save_snapshot(self):
         snapshot_dir = self.work_dir / "snapshot"
