@@ -376,20 +376,30 @@ class BCAgent:
                     params += list(self.encoder[key].parameters())
             else:
                 params = list(self.encoder.parameters())
-            self.encoder_opt = torch.optim.AdamW(params, lr=lr, weight_decay=1e-4)
+            # self.encoder_opt = torch.optim.AdamW(params, lr=lr, weight_decay=1e-4)
+            self.encoder_opt = torch.optim.SGD(params=params, lr=lr)
         # proprio
         if self.use_proprio:
-            self.proprio_opt = torch.optim.AdamW(
-                self.proprio_projector.parameters(), lr=lr, weight_decay=1e-4
+            # self.proprio_opt = torch.optim.AdamW(
+            #     self.proprio_projector.parameters(), lr=lr, weight_decay=1e-4
+            # )
+            self.proprio_opt = torch.optim.SGD(
+                self.proprio_projector.parameters(), lr=lr
             )
         # language
         if self.use_language:
-            self.language_opt = torch.optim.AdamW(
-                self.language_projector.parameters(), lr=lr, weight_decay=1e-4
+            # self.language_opt = torch.optim.AdamW(
+            #     self.language_projector.parameters(), lr=lr, weight_decay=1e-4
+            # )
+            self.language_opt = torch.optim.SGD(
+                 self.language_projector.parameters(), lr=lr
             )
         # actor
-        self.actor_opt = torch.optim.AdamW(
-            self.actor.parameters(), lr=lr, weight_decay=1e-4
+        # self.actor_opt = torch.optim.AdamW(
+        #     self.actor.parameters(), lr=lr, weight_decay=1e-4
+        # )
+        self.actor_opt = torch.optim.SGD(
+            self.actor.parameters(), lr=lr,
         )
 
         # augmentations
@@ -754,8 +764,7 @@ class BCAgent:
         for idx, dot_product in zip(batch_indices, dot_products):
             idx = idx.item()
             # TODO: see where to get the learning_rate from 
-            shapley_value = -0.001 * dot_product.item()
-            
+            shapley_value = -self.lr * dot_product.item()
             if idx not in self.shapley_values:
                 self.shapley_values[idx] = 0
                 self.iteration_count[idx] = 0
