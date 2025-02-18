@@ -7,6 +7,7 @@ import torch
 import torchvision
 from termcolor import colored
 from torch.utils.tensorboard import SummaryWriter
+import wandb
 
 BC_TRAIN_FORMAT = [
     ("step", "S", "int"),
@@ -135,16 +136,21 @@ class MetersGroup(object):
 
 
 class Logger(object):
-    def __init__(self, log_dir, use_tb, mode='bc'):
+    def __init__(self, log_dir, use_tb, use_wandb=False, mode='bc'):
         """
         mode: bc, vqvae
         """
         self._log_dir = log_dir
+        self.use_wandb = use_wandb
+        
         if mode == "bc":
             self._train_mg = MetersGroup(
                 log_dir / "train.csv", formating=BC_TRAIN_FORMAT
             )
             self._eval_mg = MetersGroup(log_dir / "eval.csv", formating=BC_EVAL_FORMAT)
+            self._validation_mg = MetersGroup(
+                log_dir / "validation.csv", formating=BC_TRAIN_FORMAT
+            )
         elif mode == "vqvae":
             self._train_mg = MetersGroup(
                 log_dir / "train.csv", formating=SSL_TRAIN_FORMAT
@@ -162,14 +168,18 @@ class Logger(object):
     def _try_sw_log(self, key, value, step):
         if self._sw is not None:
             self._sw.add_scalar(key, value, step)
+        if self.use_wandb:
+            wandb.log({key: value}, step=step)
 
     def log(self, key, value, step):
-        assert key.startswith("train") or key.startswith("eval")
-        if type(value) == torch.Tensor:
+        assert key.startswith(("train", "eval", "validation"))
+        if isinstance(value, torch.Tensor):
             value = value.item()
         self._try_sw_log(key, value, step)
         if key.startswith("train_vq"):
             mg = self._train_vq_mg
+        elif key.startswith("validation"):
+            mg = self._validation_mg
         else:
             mg = self._train_mg if key.startswith("train") else self._eval_mg
         mg.log(key, value)
@@ -180,11 +190,28 @@ class Logger(object):
 
     def dump(self, step, ty=None):
         if ty is None or ty == "eval":
+            data = self._eval_mg._prime_meters()
             self._eval_mg.dump(step, "eval")
+            if self.use_wandb:
+                wandb.log({f"eval/{k}": v for k, v in data.items()}, step=step)
+                
         if ty is None or ty == "train":
+            data = self._train_mg._prime_meters()
             self._train_mg.dump(step, "train")
+            if self.use_wandb:
+                wandb.log({f"train/{k}": v for k, v in data.items()}, step=step)
+                
         if ty is None or ty == "train_vq":
+            data = self._train_vq_mg._prime_meters()
             self._train_vq_mg.dump(step, "train_vq")
+            if self.use_wandb:
+                wandb.log({f"train_vq/{k}": v for k, v in data.items()}, step=step)
+                
+        if ty is None or ty == "validation":
+            data = self._validation_mg._prime_meters()
+            self._validation_mg.dump(step, "validation")
+            if self.use_wandb:
+                wandb.log({f"validation/{k}": v for k, v in data.items()}, step=step)
 
     def log_and_dump_ctx(self, step, ty):
         return LogAndDumpCtx(self, step, ty)

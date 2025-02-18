@@ -16,7 +16,7 @@ class BCDataset(IterableDataset):
         obs_type,
         history,
         history_len,
-        prompt,
+        prompt, 
         temporal_agg,
         num_queries,
         img_size,
