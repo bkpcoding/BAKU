@@ -162,6 +162,12 @@ class Actor(nn.Module):
             return pred_action, loss[0] if isinstance(loss, tuple) else loss
 
 
+def print_gpu_memory(tag=""):
+    if torch.cuda.is_available():
+        allocated = torch.cuda.memory_allocated() / 1024**2
+        reserved = torch.cuda.memory_reserved() / 1024**2
+        print(f"GPU Memory [{tag}] - Allocated: {allocated:.2f}MB, Reserved: {reserved:.2f}MB")
+
 class BCAgent:
     def __init__(
         self,
@@ -710,12 +716,15 @@ class BCAgent:
             return action.cpu().numpy()[0, -1, :]
 
     def update(self, expert_replay_iter, step, update=True):
+        # print_gpu_memory("Start of update")
         metrics = dict()
 
         batch = next(expert_replay_iter)
-        # removing the skill name from the batch after this step, see utils.py
         data = utils.to_torch(batch, self.device)
+        # print_gpu_memory("After data to device")
+        
         action = data["actions"].float()
+        
         # lang projection
         if self.use_language:
             lang_features = (
@@ -723,6 +732,7 @@ class BCAgent:
             )
             lang_features = self.language_projector(lang_features)
             lang_features = einops.rearrange(lang_features, "b t d -> (b t) d")
+            # print_gpu_memory("After language projection")
         else:
             lang_features = None
 
@@ -732,18 +742,17 @@ class BCAgent:
             for key in self.pixel_keys:
                 pixel = data[key].float()
                 shape = pixel.shape
-                # rearrange
                 pixel = einops.rearrange(pixel, "b t c h w -> (b t) c h w")
-                # augment
                 pixel = self.customAug(pixel / 255.0) if self.norm else pixel
-                # encode
                 lang = lang_features if self.film else None
                 if self.train_encoder:
+                    # print_gpu_memory("Before encoder forward pass")
                     pixel = (
                         self.encoder[key](pixel, lang=lang)
                         if self.separate_encoders
                         else self.encoder(pixel, lang=lang)
                     )
+                    # print_gpu_memory("After encoder forward pass")
                 else:
                     with torch.no_grad():
                         pixel = (
@@ -753,6 +762,8 @@ class BCAgent:
                         )
                 pixel = einops.rearrange(pixel, "(b t) d -> b t d", t=shape[1])
                 features.append(pixel)
+                # print_gpu_memory(f"After processing {key}")
+            
             if self.use_proprio:
                 proprio = data[self.proprio_key].float()
                 proprio = self.proprio_projector(proprio)
@@ -846,12 +857,15 @@ class BCAgent:
         if self.policy_head == "bet":
             kwargs["cluster_centers"] = self._cluster_centers
 
+        # print_gpu_memory("Before actor forward pass")
+        
         if update:
             # actor loss
             stddev = utils.schedule(self.stddev_schedule, step)
             _, actor_loss = self.actor(
                 features, num_prompt_feats, stddev, action, **kwargs
             )
+            # print_gpu_memory("After actor forward pass")
 
             if self.train_encoder:
                 self.encoder_opt.zero_grad(set_to_none=True)
@@ -865,8 +879,10 @@ class BCAgent:
                     opt.zero_grad(set_to_none=True)
             else:
                 self.actor_opt.zero_grad(set_to_none=True)
+            # print_gpu_memory("After zero_grad")
 
             actor_loss["actor_loss"].backward()
+            # print_gpu_memory("After backward pass")
 
             if self.train_encoder:
                 self.encoder_opt.step()
@@ -880,6 +896,7 @@ class BCAgent:
                     opt.step()
             else:
                 self.actor_opt.step()
+            # print_gpu_memory("After optimizer steps")
 
             if self.policy_head == "diffusion" and step % 10 == 0:
                 self.actor._action_head.net.ema_step()
@@ -888,6 +905,14 @@ class BCAgent:
                 for key, value in actor_loss.items():
                     metrics[key] = value.item()
 
+            # Clear some memory
+            if step % 100 == 0:  # Every 100 steps
+                import gc
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                # print_gpu_memory("After memory cleanup")
+
             return metrics
 
         else:
@@ -895,7 +920,8 @@ class BCAgent:
             pred_action, actor_loss = self.actor(
                 features, num_prompt_feats, stddev, action, **kwargs
             )
-
+            # print_gpu_memory("After actor forward pass (eval)")
+            
             if self.use_tb:
                 for key, value in actor_loss.items():
                     metrics[key] = value.item()
