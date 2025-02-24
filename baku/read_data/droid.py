@@ -2,7 +2,7 @@ import random
 import numpy as np
 import tensorflow_datasets as tfds
 from pathlib import Path
-
+import tensorflow as tf
 import torch
 import torchvision.transforms as transforms
 from torch.utils.data import IterableDataset
@@ -36,8 +36,18 @@ class BCDataset(IterableDataset):
         self._num_queries = num_queries
 
         # Load DROID dataset
-        self.ds = tfds.load("droid_100", data_dir=path, split="train")
-        
+        # Configure TensorFlow to use memory growth
+        gpus = tf.config.experimental.list_physical_devices('GPU')
+        if gpus:
+            try:
+                # Currently, memory growth needs to be the same across GPUs
+                for gpu in gpus:
+                    tf.config.experimental.set_memory_growth(gpu, True)
+            except RuntimeError as e:
+                print(e)
+        # Load droid dataset
+        self.ds = tfds.load("droid", data_dir=path, split="train")
+        print(f"Loaded {len(self.ds)} episodes")
         # Store episodes
         self._episodes = []
         self._max_episode_len = 0

@@ -4,9 +4,11 @@ import torch
 
 
 def _worker_init_fn(worker_id):
-    seed = np.random.get_state()[1][0] + worker_id
-    np.random.seed(seed)
-    random.seed(seed)
+    # Use a smaller base seed value
+    base_seed = worker_id + torch.initial_seed() % (2**31)
+    np.random.seed(base_seed)
+    print(f"Setting seed {base_seed} for worker {worker_id}")
+    random.seed(base_seed)
 
 
 def make_expert_replay_loader(iterable, batch_size):

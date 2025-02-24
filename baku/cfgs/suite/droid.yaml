@@ -1,13 +1,14 @@
 # @package suite
 defaults:
   - _self_
-  - task: droid_100
+  # - task: droid_100
+  - task: droid
 
 suite: droid
 name: "droid"
 
 # dataset settings
-path: "/home/bpatil/workspace/skill_seg/skill_seg/data/"
+path: "/nfs/turbo/coe-mandmlab/shared_data/sagar_corl2025/"
 num_demos: 100
 obs_type: "pixels"
 history: false

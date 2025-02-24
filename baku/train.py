@@ -38,8 +38,16 @@ def make_agent(obs_spec, action_spec, cfg):
     return hydra.utils.instantiate(cfg.agent)
 
 
+def print_gpu_memory(tag=""):
+    if torch.cuda.is_available():
+        allocated = torch.cuda.memory_allocated() / 1024**2
+        reserved = torch.cuda.memory_reserved() / 1024**2
+        print(f"GPU Memory [{tag}] - Allocated: {allocated:.2f}MB, Reserved: {reserved:.2f}MB")
+
+
 class WorkspaceIL:
     def __init__(self, cfg):
+        # print_gpu_memory("Before init")
         self.work_dir = Path.cwd()
         print(f"workspace: {self.work_dir}")
 
@@ -54,6 +62,7 @@ class WorkspaceIL:
         )
         self.expert_replay_iter = iter(self.expert_replay_loader)
         self.stats = self.expert_replay_loader.dataset.stats
+        # print_gpu_memory("After dataset loading")
 
         # Initialize wandb if enabled
         if cfg.use_wandb:
@@ -98,6 +107,7 @@ class WorkspaceIL:
             obs_spec = self.expert_replay_loader.dataset.get_observation_spec()
             action_spec = self.expert_replay_loader.dataset.get_action_spec()
             self.agent = make_agent(obs_spec, action_spec, cfg)
+        # print_gpu_memory("After agent creation")
 
         try:
             self.envs_till_idx = self.expert_replay_loader.dataset.envs_till_idx
@@ -223,7 +233,7 @@ class WorkspaceIL:
         self.agent.train(True)
 
     def validate(self):
-        """Compute validation loss, handling both skill-based and regular datasets."""
+        print_gpu_memory("Start validation")
         self.agent.train(False)
         
         if hasattr(self.expert_replay_loader.dataset, 'get_validation_batch_per_skill'):
@@ -234,6 +244,7 @@ class WorkspaceIL:
             
             skill_losses = {}
             for skill_name, val_batches in val_batches_per_skill.items():
+                print_gpu_memory(f"Processing skill: {skill_name}")
                 total_skill_loss = 0
                 num_valid_samples = 0
                 
@@ -324,10 +335,12 @@ class WorkspaceIL:
                 })
             wandb.log(wandb_log_dict)
             
+        print_gpu_memory("End validation")
         self.agent.train(True)
         return skill_losses, overall_val_loss
 
     def train(self):
+        print_gpu_memory("Start training")
         # predicates
         train_until_step = utils.Until(self.cfg.suite.num_train_steps, 1)
         log_every_step = utils.Every(self.cfg.suite.log_every_steps, 1)
@@ -337,6 +350,9 @@ class WorkspaceIL:
 
         metrics = None
         while train_until_step(self.global_step):
+            # if self.global_step % 100 == 0:  # Print every 100 steps
+                # print_gpu_memory(f"Training step {self.global_step}")
+
             # try to evaluate - only if env is loaded and eval is enabled
             if (
                 self.cfg.eval
@@ -351,6 +367,18 @@ class WorkspaceIL:
 
             # update
             metrics = self.agent.update(self.expert_replay_iter, self.global_step)
+            
+            # if self.global_step % 100 == 0:  # Print every 100 steps
+                # print_gpu_memory(f"After update step {self.global_step}")
+            
+            # Add explicit garbage collection after updates
+            if self.global_step % 1000 == 0:
+                import gc
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                # print_gpu_memory(f"After GC step {self.global_step}")
+            
             self.logger.log_metrics(metrics, self.global_frame, ty="train")
 
             # log

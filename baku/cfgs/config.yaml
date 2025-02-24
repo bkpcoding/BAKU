@@ -6,11 +6,12 @@ defaults:
   - override hydra/launcher: submitit_local
 
 # Root Dir
-root_dir: /home/bpatil/workspace/BAKU
+# root_dir: /home/bpatil/workspace/BAKU
+root_dir: /home/bpatil/projects/BAKU
 
 # misc
 seed: 2
-device: cuda:1
+device: cuda
 save_video: false
 save_train_video: false
 use_tb: true

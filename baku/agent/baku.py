@@ -415,6 +415,7 @@ class BCAgent:
             )
         # actor
         if self.use_muon:
+            print(f"********** Using Muon optimizer for actor **********")
             muon_params = [p for p in self.actor.parameters() if p.ndim >= 2]
             adamw_params = [p for p in self.actor.parameters() if p.ndim < 2]
             self.actor_opt = [
@@ -422,6 +423,7 @@ class BCAgent:
                 torch.optim.AdamW(adamw_params, lr=lr, weight_decay=1e-4)
             ]
         else:
+            print(f"********** Using AdamW optimizer for actor **********")
             self.actor_opt = torch.optim.AdamW(
                 self.actor.parameters(), lr=lr, weight_decay=1e-4
             )
