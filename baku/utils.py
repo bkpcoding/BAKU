@@ -44,7 +44,11 @@ def soft_update_params(net, target_net, tau):
 #     return tuple(torch.as_tensor(x, device=device) for x in xs)
 def to_torch(xs, device):
     for key, value in xs.items():
-        xs[key] = torch.as_tensor(value, device=device)
+        try:
+            xs[key] = torch.as_tensor(value, device=device)
+        except ValueError:
+            continue
+
     return xs
 
 
@@ -262,3 +266,259 @@ def batch_norm_to_group_norm(layer):
                 sub_layer = batch_norm_to_group_norm(sub_layer)
                 layer.__setattr__(name=name, value=sub_layer)
     return layer
+
+
+import torch
+import torch.nn as nn
+
+class ActionAutoencoder(nn.Module):
+   def __init__(self, action_dim, latent_dim, seq_length, hidden_dim=256):
+       super().__init__()
+       self.seq_length = seq_length
+       self.latent_dim = latent_dim
+
+       # Encoder
+       self.encoder = nn.Sequential(
+           nn.Linear(action_dim * seq_length, hidden_dim),
+           nn.ReLU(),
+           nn.Linear(hidden_dim, hidden_dim),
+           nn.ReLU()
+       )
+       
+       # Latent projections for VAE
+       self.fc_mu = nn.Linear(hidden_dim, latent_dim)
+       self.fc_var = nn.Linear(hidden_dim, latent_dim)
+
+       # Decoder
+       self.decoder = nn.Sequential(
+           nn.Linear(latent_dim, hidden_dim),
+           nn.ReLU(),
+           nn.Linear(hidden_dim, hidden_dim),
+           nn.ReLU(),
+           nn.Linear(hidden_dim, action_dim * seq_length)
+       )
+
+   def encode(self, x):
+       # x shape: [batch_size, seq_length, action_dim]
+       batch_size = x.shape[0]
+       x = x.reshape(batch_size, -1)  # Flatten sequence
+       h = self.encoder(x)
+       return self.fc_mu(h), self.fc_var(h)
+
+   def reparameterize(self, mu, logvar):
+       std = torch.exp(0.5 * logvar)
+       eps = torch.randn_like(std)
+       return mu + eps * std
+
+   def decode(self, z):
+       # z shape: [batch_size, latent_dim]
+       output = self.decoder(z)
+       return output.reshape(-1, self.seq_length, output.shape[-1]//self.seq_length)
+
+   def forward(self, x):
+       mu, logvar = self.encode(x)
+       z = self.reparameterize(mu, logvar)
+       return self.decode(z), mu, logvar
+   
+   def loss_function(self, recon_x, x, mu, logvar, kl_weight=0.01):
+       MSE = torch.nn.functional.mse_loss(recon_x, x, reduction='mean')
+       KLD = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
+       return MSE + kl_weight * KLD
+
+
+
+import torch
+import pickle
+import numpy as np
+from sklearn.manifold import TSNE
+import matplotlib.pyplot as plt
+import os
+
+def load_pkl_data(data_dir):
+   all_data = []
+   labels = []
+   skill_names = []
+   
+   for i, file in enumerate(sorted(os.listdir(data_dir))):
+       if file.endswith('.pkl'):
+           with open(os.path.join(data_dir, file), 'rb') as f:
+               data = pickle.load(f)
+               all_data.append(data)
+               labels.extend([i] * len(data))
+               skill_names.append(file.split('.')[0])
+           
+   return np.concatenate(all_data), np.array(labels), skill_names
+
+# Setup training
+def train_model(model, data, n_epochs=100, batch_size=32):
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    
+    for epoch in range(n_epochs):
+        # Shuffle data
+        idx = np.random.permutation(len(data))
+        total_loss = 0
+        
+        for i in range(0, len(data), batch_size):
+            batch_idx = idx[i:i+batch_size]
+            batch = torch.FloatTensor(data[batch_idx])
+            
+            optimizer.zero_grad()
+            recon, mu, logvar = model(batch)
+            loss = model.loss_function(recon, batch, mu, logvar)
+            loss.backward()
+            optimizer.step()
+            
+            total_loss += loss.item()
+            
+        if epoch % 10 == 0:
+            print(f"Epoch {epoch}, Loss: {total_loss/len(data)}")
+
+# Visualize latent space
+def visualize_latent(model, data, labels, skill_names):
+    model.eval()
+    with torch.no_grad():
+        mu, _ = model.encode(torch.FloatTensor(data))
+        latent = mu.numpy()
+    
+    # Use t-SNE for visualization
+    tsne = TSNE(n_components=2)
+    latent_2d = tsne.fit_transform(latent)
+    
+    # Plot
+    plt.figure(figsize=(10, 10))
+    for i, skill in enumerate(skill_names):
+        mask = labels == i
+        plt.scatter(latent_2d[mask, 0], latent_2d[mask, 1], label=skill)
+    
+    plt.legend()
+    plt.title("Action Latent Space")
+    plt.show()
+
+def main():
+    # Load and preprocess data
+    data_dir = "/home/shared_data/data_attrib_data/pkl_libero/libero_90/skill_datasets/"
+    data, labels, skill_names = load_pkl_data(data_dir)
+
+    # Create and train model
+    seq_length = data.shape[1]  # Get sequence length from data
+    action_dim = data.shape[2]  # Get action dimension from data
+    latent_dim = 32
+
+    model = ActionAutoencoder(action_dim, latent_dim, seq_length)
+    train_model(model, data)
+
+    # Visualize results
+    visualize_latent(model, data, labels, skill_names)
+
+if __name__=="__main__":
+    main()
+    
+class TransformerActionEncoder(nn.Module):
+    def __init__(self, action_dim, latent_dim, seq_length, num_layers=3, nhead=8):
+        super().__init__()
+        self.seq_length = seq_length
+        self.latent_dim = latent_dim
+        
+        # Action embedding
+        self.action_embedding = nn.Linear(action_dim, latent_dim)
+        
+        # Position encoding
+        self.pos_embedding = nn.Parameter(torch.randn(1, seq_length + 1, latent_dim))
+        
+        # CLS token
+        self.cls_token = nn.Parameter(torch.randn(1, 1, latent_dim))
+        
+        # Transformer encoder
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=latent_dim,
+            nhead=nhead,
+            dim_feedforward=4*latent_dim,
+            batch_first=True
+        )
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        
+        # Latent projections
+        self.fc_mu = nn.Linear(latent_dim, latent_dim)
+        self.fc_var = nn.Linear(latent_dim, latent_dim)
+
+class TransformerActionDecoder(nn.Module):
+    def __init__(self, action_dim, latent_dim, seq_length, num_layers=6, nhead=8):
+        super().__init__()
+        self.seq_length = seq_length
+        
+        # Position embeddings for decoder
+        self.pos_embedding = nn.Parameter(torch.randn(1, seq_length, latent_dim))
+        
+        # Transformer decoder
+        decoder_layer = nn.TransformerDecoderLayer(
+            d_model=latent_dim,
+            nhead=nhead,
+            dim_feedforward=4*latent_dim,
+            batch_first=True
+        )
+        self.transformer = nn.TransformerDecoder(decoder_layer, num_layers=num_layers)
+        
+        # Output projection
+        self.output_projection = nn.Linear(latent_dim, action_dim)
+
+class ActionTransformerAE(nn.Module):
+    def __init__(self, action_dim, latent_dim, seq_length):
+        super().__init__()
+        self.encoder = TransformerActionEncoder(action_dim, latent_dim, seq_length)
+        self.decoder = TransformerActionDecoder(action_dim, latent_dim, seq_length)
+        
+    def encode(self, x):
+        # x shape: [batch_size, seq_length, action_dim]
+        batch_size = x.shape[0]
+        
+        # Embed actions
+        x = self.encoder.action_embedding(x)
+        
+        # Add CLS token
+        cls_tokens = self.encoder.cls_token.expand(batch_size, -1, -1)
+        x = torch.cat((cls_tokens, x), dim=1)
+        
+        # Add position embeddings
+        x = x + self.encoder.pos_embedding
+        
+        # Transform
+        encoded = self.encoder.transformer(x)
+        
+        # Get CLS token output
+        cls_output = encoded[:, 0]
+        
+        # Project to latent distribution
+        mu = self.encoder.fc_mu(cls_output)
+        logvar = self.encoder.fc_var(cls_output)
+        
+        return mu, logvar
+    
+    def reparameterize(self, mu, logvar):
+        std = torch.exp(0.5 * logvar)
+        eps = torch.randn_like(std)
+        return mu + eps * std
+        
+    def decode(self, z):
+        batch_size = z.shape[0]
+        
+        # Expand latent to sequence length
+        query = self.decoder.pos_embedding.expand(batch_size, -1, -1)
+        
+        # Expand z for decoder
+        memory = z.unsqueeze(1).expand(-1, self.decoder.seq_length, -1)
+        
+        # Decode
+        decoded = self.decoder.transformer(query, memory)
+        actions = self.decoder.output_projection(decoded)
+        
+        return actions
+        
+    def forward(self, x):
+        mu, logvar = self.encode(x)
+        z = self.reparameterize(mu, logvar)
+        return self.decode(z), mu, logvar
+
+    def loss_function(self, recon_x, x, mu, logvar, kl_weight=0.01):
+        MSE = torch.nn.functional.mse_loss(recon_x, x, reduction='mean')
+        KLD = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
+        return MSE + kl_weight * KLD
