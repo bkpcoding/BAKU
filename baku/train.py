@@ -123,7 +123,7 @@ class WorkspaceIL:
         )
 
         # Add validation logging frequency and batch size
-        self.validate_every_steps = cfg.suite.get('validate_every_steps', 1000)
+        self.validate_every_steps = cfg.suite.get('validate_every_steps', 100000)
         self.validation_batch_size = cfg.suite.get('validation_batch_size', 32)
         
         # Initialize best validation losses per skill

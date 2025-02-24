@@ -233,7 +233,7 @@ class BCAgent:
 
         # language
         self.language_fusion = "none" if not self.use_language else "film"
-        self.language_dim = 768
+        self.language_dim = 384
         self.lang_repr_dim = 512
 
         # actor parameters

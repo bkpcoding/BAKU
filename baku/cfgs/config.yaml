@@ -20,14 +20,14 @@ wandb_project: "skill_sampling"  # wandb project name
 wandb_run_name: ${now:%Y.%m.%d}_${experiment}_${experiment_label}  # wandb run name
 batch_size: 128
 validation_batch_size: 32
-validate_every_steps: 1000
+validate_every_steps: 100000
 
 # experiment
 obs_type: "pixels" # pixels, features
 num_demos_per_task: 50
 encoder_type: 'resnet' # base, resnet
 policy_type: 'gpt' # mlp, gpt
-policy_head: deterministic # deterministic, gmm, bet, diffusion, vqbet
+policy_head: diffusion # deterministic, gmm, bet, diffusion, vqbet
 use_proprio: true
 use_language: true
 use_actions: false
