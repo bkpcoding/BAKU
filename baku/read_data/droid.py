@@ -46,7 +46,7 @@ class BCDataset(IterableDataset):
             except RuntimeError as e:
                 print(e)
         # Load droid dataset
-        self.ds = tfds.load("droid", data_dir=path, split="train")
+        self.ds = tfds.load("droid_100", data_dir=path, split="train")
         print(f"Loaded {len(self.ds)} episodes")
         # Store episodes
         self._episodes = []

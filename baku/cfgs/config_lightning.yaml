@@ -19,7 +19,7 @@ use_tb: true
 use_wandb: false  # enable/disable wandb logging
 wandb_project: "skill_sampling"  # wandb project name
 wandb_run_name: ${now:%Y.%m.%d}_${experiment}_${experiment_label}  # wandb run name
-batch_size: 512
+# batch_size: 512
 validation_batch_size: 32
 validate_every_steps: 1000
 
@@ -48,6 +48,34 @@ expert_dataset: ${dataloader.bc_dataset}
 # Load weights
 load_bc: false
 bc_weight: /home/bpatil/workspace/BAKU/baku/exp_local/2025.01.22_train/vqbet/213402_hidden_dim_256/snapshot/600000.pt
+
+# --------------- PyTorch Lightning parameters ---------------
+# Multi-GPU configuration
+num_gpus: ${oc.env:NUM_GPUS,1}  # Use environment variable or default to 1
+# Update batch size with per-GPU and global values
+per_gpu_batch_size: 512  # Set a direct value here
+batch_size: ${per_gpu_batch_size}  # Initially set to per_gpu_batch_size
+
+# Training optimization parameters
+precision: 32  # 16 for mixed precision, 32 for full precision
+gradient_clip_val: 1.0  # Gradient clipping value
+deterministic: false  # Set to true for fully reproducible results
+val_check_interval: ${validate_every_steps}  # How often to run validation
+
+# DataLoader parameters
+num_workers: 4  # DataLoader workers per GPU
+pin_memory: true  # Pin memory for faster data transfer to GPU
+persistent_workers: true  # Keep workers alive between epochs
+
+# Checkpointing configuration
+checkpoint_dir: "checkpoints"
+save_top_k: 3  # Number of best models to save
+save_last: true  # Whether to save the last model
+monitor_metric: "val/actor_loss"  # Metric to monitor for best model
+monitor_mode: "min"  # Direction of improvement (min or max)
+
+# Additional logging
+log_every_n_steps: ${suite.log_every_steps}  # Log frequency to match existing config
 
 hydra:
   run:
