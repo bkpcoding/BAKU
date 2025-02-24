@@ -16,11 +16,9 @@ class BCLightningModule(pl.LightningModule):
         cfg
     ):
         super().__init__()
-        self.agent = agent
-        # Register the agent's parameters with the module
-        if hasattr(self.agent, 'parameters'):
-            for param in self.agent.parameters():
-                param.requires_grad_(True)
+        self.automatic_optimization = False
+        # Register the agent as a module instead of just storing it
+        self.agent = self._register_agent(agent)
         
         self.expert_dataset = expert_dataset
         self.batch_size = batch_size
@@ -30,29 +28,39 @@ class BCLightningModule(pl.LightningModule):
         # Save hyperparameters for logging and checkpointing
         self.save_hyperparameters(ignore=["agent", "expert_dataset"])
         
-        # Verify that we have trainable parameters
+        # Variables that used to be in WorkspaceIL
+        self._global_step = 0
+        self._global_episode = 0
+        
+    def _register_agent(self, agent):
+        """Helper method to properly register the agent's components as modules"""
+        # Register main components
+        if hasattr(agent, 'actor'):
+            self.register_module('actor', agent.actor)
+        if hasattr(agent, 'encoder'):
+            if isinstance(agent.encoder, dict):
+                # For separate encoders
+                for key, encoder in agent.encoder.items():
+                    self.register_module(f'encoder_{key}', encoder)
+            else:
+                self.register_module('encoder', agent.encoder)
+        if hasattr(agent, 'proprio_projector'):
+            self.register_module('proprio_projector', agent.proprio_projector)
+        if hasattr(agent, 'language_projector'):
+            self.register_module('language_projector', agent.language_projector)
+            
+        # Verify that we have trainable parameters after registration
         has_params = False
         for param in self.parameters():
             if param.requires_grad:
                 has_params = True
                 break
+                
         if not has_params:
-            raise ValueError("Model has no trainable parameters! Check that the agent is properly initialized.")
-        
-        # Initialize validation metrics tracking
-        if hasattr(self.expert_dataset, 'get_skill_names'):
-            self.best_val_losses = {
-                skill: float('inf') 
-                for skill in self.expert_dataset.get_skill_names()
-            }
-        else:
-            # For datasets without explicit skills, use a single overall validation loss
-            self.best_val_losses = {'overall': float('inf')}
-        
-        # Variables that used to be in WorkspaceIL
-        self._global_step = 0
-        self._global_episode = 0
-        
+            raise ValueError("Model has no trainable parameters after registration! Check agent components.")
+            
+        return agent
+
     def forward(self, batch):
         # Forward pass logic
         # This will be used for inference/validation
@@ -64,8 +72,26 @@ class BCLightningModule(pl.LightningModule):
         return metrics
     
     def training_step(self, batch, batch_idx):
-        # Training step logic
-        metrics = self.agent.update(iter([batch]), self.global_step)
+        # Get all optimizers
+        optimizers = self.optimizers()
+        if not isinstance(optimizers, list):
+            optimizers = [optimizers]
+
+        # Zero all gradients
+        for opt in optimizers:
+            opt.zero_grad()
+
+        # Compute loss and metrics
+        metrics = self.agent.compute_loss(batch, self.global_step)
+        loss = metrics["actor_loss"]
+        
+        # Backward pass
+        self.manual_backward(loss)
+        
+        # Step all optimizers
+        for opt in optimizers:
+            opt.step()
+        
         self._global_step += 1
         
         # Log metrics

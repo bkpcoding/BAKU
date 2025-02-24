@@ -8,7 +8,8 @@ suite: droid
 name: "droid"
 
 # dataset settings
-path: "/nfs/turbo/coe-mandmlab/shared_data/sagar_corl2025/"
+# path: "/nfs/turbo/coe-mandmlab/shared_data/sagar_corl2025/"
+path: "/home/bpatil/workspace/skill_seg/skill_seg/data/"
 num_demos: 100
 obs_type: "pixels"
 history: false

@@ -125,6 +125,12 @@ class Actor(nn.Module):
             obs = obs.view(B, 1, T * D)
             features = self._policy(obs)
         elif self._policy_type == "gpt":
+            # Add debug prints
+            print(f"Input obs shape: {obs.shape}")
+            print(f"num_feat_per_step: {self._num_feat_per_step}")
+            print(f"Expected reshape: [B={B}, T={T}, feat_per_step={self._num_feat_per_step}, D={D}]")
+            print(f"Total elements: {obs.numel()}")
+            
             # insert action token at each self._num_feat_per_step interval
             prompt = obs[:, :num_prompt_feats]
             obs = obs[:, num_prompt_feats:]
@@ -717,16 +723,14 @@ class BCAgent:
                 return post_process(action.cpu().numpy()[0, -1])
             return action.cpu().numpy()[0, -1, :]
 
+
     def update(self, expert_replay_iter, step, update=True):
-        # print_gpu_memory("Start of update")
         metrics = dict()
 
         batch = next(expert_replay_iter)
         data = utils.to_torch(batch, self.device)
-        # print_gpu_memory("After data to device")
-        
         action = data["actions"].float()
-        
+
         # lang projection
         if self.use_language:
             lang_features = (
@@ -734,7 +738,6 @@ class BCAgent:
             )
             lang_features = self.language_projector(lang_features)
             lang_features = einops.rearrange(lang_features, "b t d -> (b t) d")
-            # print_gpu_memory("After language projection")
         else:
             lang_features = None
 
@@ -744,17 +747,18 @@ class BCAgent:
             for key in self.pixel_keys:
                 pixel = data[key].float()
                 shape = pixel.shape
+                # rearrange
                 pixel = einops.rearrange(pixel, "b t c h w -> (b t) c h w")
+                # augment
                 pixel = self.customAug(pixel / 255.0) if self.norm else pixel
+                # encode
                 lang = lang_features if self.film else None
                 if self.train_encoder:
-                    # print_gpu_memory("Before encoder forward pass")
                     pixel = (
                         self.encoder[key](pixel, lang=lang)
                         if self.separate_encoders
                         else self.encoder(pixel, lang=lang)
                     )
-                    # print_gpu_memory("After encoder forward pass")
                 else:
                     with torch.no_grad():
                         pixel = (
@@ -764,8 +768,6 @@ class BCAgent:
                         )
                 pixel = einops.rearrange(pixel, "(b t) d -> b t d", t=shape[1])
                 features.append(pixel)
-                # print_gpu_memory(f"After processing {key}")
-            
             if self.use_proprio:
                 proprio = data[self.proprio_key].float()
                 proprio = self.proprio_projector(proprio)
@@ -859,15 +861,12 @@ class BCAgent:
         if self.policy_head == "bet":
             kwargs["cluster_centers"] = self._cluster_centers
 
-        # print_gpu_memory("Before actor forward pass")
-        
         if update:
             # actor loss
             stddev = utils.schedule(self.stddev_schedule, step)
             _, actor_loss = self.actor(
                 features, num_prompt_feats, stddev, action, **kwargs
             )
-            # print_gpu_memory("After actor forward pass")
 
             if self.train_encoder:
                 self.encoder_opt.zero_grad(set_to_none=True)
@@ -875,30 +874,15 @@ class BCAgent:
                 self.proprio_opt.zero_grad(set_to_none=True)
             if self.use_language:
                 self.language_opt.zero_grad(set_to_none=True)
-            # actor_opt can be a list of optimizers when using Muon
-            if isinstance(self.actor_opt, list):
-                for opt in self.actor_opt:
-                    opt.zero_grad(set_to_none=True)
-            else:
-                self.actor_opt.zero_grad(set_to_none=True)
-            # print_gpu_memory("After zero_grad")
-
+            self.actor_opt.zero_grad(set_to_none=True)
             actor_loss["actor_loss"].backward()
-            # print_gpu_memory("After backward pass")
-
             if self.train_encoder:
                 self.encoder_opt.step()
             if self.obs_type == "pixels" and self.use_proprio:
                 self.proprio_opt.step()
             if self.use_language:
                 self.language_opt.step()
-            # actor_opt can be a list of optimizers when using Muon
-            if isinstance(self.actor_opt, list):
-                for opt in self.actor_opt:
-                    opt.step()
-            else:
-                self.actor_opt.step()
-            # print_gpu_memory("After optimizer steps")
+            self.actor_opt.step()
 
             if self.policy_head == "diffusion" and step % 10 == 0:
                 self.actor._action_head.net.ema_step()
@@ -907,14 +891,6 @@ class BCAgent:
                 for key, value in actor_loss.items():
                     metrics[key] = value.item()
 
-            # Clear some memory
-            if step % 100 == 0:  # Every 100 steps
-                import gc
-                gc.collect()
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                # print_gpu_memory("After memory cleanup")
-
             return metrics
 
         else:
@@ -922,8 +898,7 @@ class BCAgent:
             pred_action, actor_loss = self.actor(
                 features, num_prompt_feats, stddev, action, **kwargs
             )
-            # print_gpu_memory("After actor forward pass (eval)")
-            
+
             if self.use_tb:
                 for key, value in actor_loss.items():
                     metrics[key] = value.item()
@@ -941,6 +916,7 @@ class BCAgent:
             metrics["pred_action"] = pred_action.cpu().numpy()
 
             return metrics
+
 
     def save_snapshot(self):
         model_keys = ["actor", "encoder"]
@@ -1091,18 +1067,16 @@ class BCAgent:
                 pixel = self.customAug(pixel / 255.0) if self.norm else pixel
                 # encode
                 lang = lang_features if self.film else None
-                with torch.no_grad():  # Don't compute gradients during validation
-                    pixel = (
-                        self.encoder[key](pixel, lang=lang)
-                        if self.separate_encoders
-                        else self.encoder(pixel, lang=lang)
-                    )
+                pixel = (
+                    self.encoder[key](pixel, lang=lang)
+                    if self.separate_encoders
+                    else self.encoder(pixel, lang=lang)
+                )
                 pixel = einops.rearrange(pixel, "(b t) d -> b t d", t=shape[1])
                 features.append(pixel)
             if self.use_proprio:
                 proprio = data[self.proprio_key].float()
-                with torch.no_grad():
-                    proprio = self.proprio_projector(proprio)
+                proprio = self.proprio_projector(proprio)
                 features.append(proprio)
             # concatenate
             features = torch.cat(features, dim=-1).view(
@@ -1111,8 +1085,7 @@ class BCAgent:
         else:
             features = data[self.feature_key].float()
             shape = features.shape
-            with torch.no_grad():
-                features = self.encoder(features)
+            features = self.encoder(features)
 
         # prompt
         prompt_features = []
@@ -1176,11 +1149,14 @@ class BCAgent:
         if self.policy_head == "bet":
             kwargs["cluster_centers"] = self._cluster_centers
 
-        # Compute actor loss without gradients
-        with torch.no_grad():
-            stddev = utils.schedule(self.stddev_schedule, step)
-            _, actor_loss = self.actor(
-                features, num_prompt_feats, stddev, action, **kwargs
-            )
+        # Compute actor loss and ensure it's connected to the computational graph
+        stddev = utils.schedule(self.stddev_schedule, step)
+        _, actor_loss = self.actor(
+            features, num_prompt_feats=0, stddev=stddev, action=action, **kwargs
+        )
+        
+        # Ensure loss requires grad
+        if not actor_loss.requires_grad:
+            actor_loss = actor_loss.requires_grad_(True)
 
-        return actor_loss
+        return {"actor_loss": actor_loss}

@@ -125,7 +125,7 @@ class LightningWorkspaceIL:
                 )
 
         # Calculate global batch size based on number of GPUs
-        cfg.batch_size = cfg.per_gpu_batch_size * cfg.num_gpus
+        cfg.batch_size = int(cfg.per_gpu_batch_size) * int(cfg.num_gpus)
 
         # Create Lightning module
         self.model = BCLightningModule(
@@ -188,7 +188,7 @@ class LightningWorkspaceIL:
             "devices": int(cfg.num_gpus),
             "precision": cfg.precision if hasattr(cfg, "precision") else 32,
             "deterministic": cfg.deterministic if hasattr(cfg, "deterministic") else False,
-            "gradient_clip_val": cfg.gradient_clip_val if hasattr(cfg, "gradient_clip_val") else 0.0
+            # "gradient_clip_val": cfg.gradient_clip_val if hasattr(cfg, "gradient_clip_val") else 0.0
         }
         
         self.trainer = pl.Trainer(**trainer_kwargs)

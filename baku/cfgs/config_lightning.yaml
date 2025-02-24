@@ -8,6 +8,8 @@ defaults:
 # Root Dir
 # root_dir: /home/bpatil/workspace/BAKU
 root_dir: /home/bpatil/projects/BAKU
+# Add data directory
+data_dir: ${root_dir}/data
 
 # misc
 seed: 2
@@ -21,7 +23,7 @@ wandb_project: "skill_sampling"  # wandb project name
 wandb_run_name: ${now:%Y.%m.%d}_${experiment}_${experiment_label}  # wandb run name
 # batch_size: 512
 validation_batch_size: 32
-validate_every_steps: 1000
+validate_every_steps: 10
 
 # experiment
 obs_type: "pixels" # pixels, features
@@ -58,7 +60,7 @@ batch_size: ${per_gpu_batch_size}  # Initially set to per_gpu_batch_size
 
 # Training optimization parameters
 precision: 32  # 16 for mixed precision, 32 for full precision
-gradient_clip_val: 1.0  # Gradient clipping value
+gradient_clip_val: 1.0  # Gradient clipping value *** check if this is needed
 deterministic: false  # Set to true for fully reproducible results
 val_check_interval: ${validate_every_steps}  # How often to run validation
 
